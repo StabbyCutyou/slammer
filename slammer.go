@@ -125,7 +125,7 @@ func startWorker(workerNum int, ic <-chan string, oc chan<- result, sc <-chan os
 		case _ = <-sc:
 			// UGH I ACTUALLY ALMOST USED A GOTO HERE BUT I JUST CANT DO IT
 			// NO NO NO NO NO NO I WONT YOU CANT MAKE ME NO
-			fmt.Println("SIG!")
+			// I could put it into an anonymous function defer, though...
 			r.end = time.Now()
 			oc <- r
 			done.Done()
