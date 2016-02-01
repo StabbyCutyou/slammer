@@ -66,8 +66,8 @@ Support for more databases
 
 Improve the summary at the end to include overall statistics
 
-Sparklines shown in the terminal to demonstrate latency and throughput with real time
-visualizations
+"Interactive" mode, with sparklines shown in the terminal to demonstrate latency
+and throughput with real time visualizations
 
 # License
 

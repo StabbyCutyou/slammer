@@ -42,6 +42,8 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// Open the connection to the DB - should each worker open it's own connection?
+	// Food for thought
 	db, err := sql.Open(cfg.db, cfg.connString)
 	if err != nil {
 		log.Fatal(err)
@@ -90,16 +92,22 @@ func main() {
 	// Collect all results, report them. This will block and wait until all results
 	// are in
 	fmt.Println("Slammer Status:")
-	fmt.Printf("Queries to run: %d\n", totalWorkCount)
+	totalErrors := 0
+	var totalDbTime time.Duration
 	for i := 0; i < cfg.workers; i++ {
 		r := <-outputChan
 		workerDuration := r.end.Sub(r.start)
+		totalErrors += r.errors
+		totalDbTime += r.dbTime
 		fmt.Printf("---- Worker #%d ----\n", i)
 		fmt.Printf("  Started at %s , Ended at %s, Worker time %s, DB time %s\n", r.start.Format("2006-01-02 15:04:05"), r.end.Format("2006-01-02 15:04:05"), workerDuration.String(), r.dbTime)
-		fmt.Printf("  Total work: %d, Percentage work: %f, Average work over DB time: %f\n", r.workCount, float64(r.workCount)/float64(totalWorkCount), float64(r.workCount)/float64(r.dbTime))
-		fmt.Printf("  Total errors: %d , Percentage errors: %f, Average errors per second: %f\n", r.errors, float64(r.errors)/float64(r.workCount), float64(r.errors)/workerDuration.Seconds())
+		fmt.Printf("  Units of work: %d, Percentage work: %f, Average work over DB time: %f\n", r.workCount, float64(r.workCount)/float64(totalWorkCount), float64(r.workCount)/float64(r.dbTime))
+		fmt.Printf("  Errors: %d , Percentage errors: %f, Average errors per second: %f\n", r.errors, float64(r.errors)/float64(r.workCount), float64(r.errors)/workerDuration.Seconds())
 	}
-
+	// TODO work on improving what we report here
+	fmt.Printf("---- Overall ----\n")
+	fmt.Printf("  Units of work: %d, DB time %s, Average work over DB time: %f\n", totalWorkCount, totalDbTime, float64(totalWorkCount)/float64(totalDbTime))
+	fmt.Printf("  Errors: %d, Percentage errors: %f\n", totalErrors, float64(totalErrors)/float64(totalWorkCount))
 	// Lets just be nice and tidy
 	close(outputChan)
 }
@@ -162,6 +170,8 @@ func getConfig() (*config, error) {
 	db := flag.String("db", "mysql", "The database driver to load. Defaults to mysql")
 	w := flag.Int("w", 1, "The number of workers to use. A number greater than 1 will enable statements to be issued concurrently")
 	d := flag.Bool("d", false, "Debug mode - turn this on to have errors printed to the terminal")
+	// TODO support an "interactive" flag to drop you into a shell that outputs things like
+	// sparklines of the current worker throughputs
 	flag.Parse()
 
 	if *c == "" {
