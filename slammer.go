@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
 	"time"
@@ -57,34 +58,7 @@ func main() {
 	wg.Add(cfg.workers)
 
 	// Start the pool of workers up, reading from the channel
-	for i := 0; i < cfg.workers; i++ {
-		// Pass in everything it needs
-		go func(workerNum int, ic <-chan string, oc chan<- result, d *sql.DB, done *sync.WaitGroup, pause time.Duration, debugMode bool) {
-			// Prep the result object
-			r := result{start: time.Now()}
-			for line := range ic {
-				t := time.Now()
-				_, err := db.Exec(line)
-				r.dbTime += time.Since(t)
-				// TODO should this be after the err != nil? It counts towards work attempted
-				// but not work completed.
-				r.workCount++
-				if err != nil {
-					r.errors++
-					if debugMode {
-						log.Printf("Worker #%d: %s - %s", workerNum, line, err.Error())
-					}
-				} else {
-					// Sleep for the configured amount of pause time between each call
-					time.Sleep(pause)
-				}
-			}
-			// Let everyone know we're done, and bail out
-			r.end = time.Now()
-			oc <- r
-			done.Done()
-		}(i, inputChan, outputChan, db, &wg, cfg.pauseInterval, cfg.debugMode)
-	}
+	startWorkers(cfg.workers, inputChan, outputChan, db, &wg, cfg.pauseInterval, cfg.debugMode)
 
 	// Warm up error and line so I can use error in the for loop with running into
 	// a shadowing issue
@@ -128,6 +102,58 @@ func main() {
 
 	// Lets just be nice and tidy
 	close(outputChan)
+}
+
+func startWorkers(count int, ic <-chan string, oc chan<- result, db *sql.DB, wg *sync.WaitGroup, pause time.Duration, debugMode bool) {
+	// Start the pool of workers up, reading from the channel
+	for i := 0; i < count; i++ {
+		// register a signal chan for handling shutdown
+		sc := make(chan os.Signal)
+		signal.Notify(sc, os.Interrupt)
+		// Pass in everything it needs
+		go startWorker(i, ic, oc, sc, db, wg, pause, debugMode)
+	}
+}
+
+func startWorker(workerNum int, ic <-chan string, oc chan<- result, sc <-chan os.Signal, db *sql.DB, done *sync.WaitGroup, pause time.Duration, debugMode bool) {
+	// Prep the result object
+	r := result{start: time.Now()}
+	for line := range ic {
+		// First thing is first - do a non blocking read from the signal channel, and
+		// handle it if something came through the pipe
+		select {
+		case _ = <-sc:
+			// UGH I ACTUALLY ALMOST USED A GOTO HERE BUT I JUST CANT DO IT
+			// NO NO NO NO NO NO I WONT YOU CANT MAKE ME NO
+			fmt.Println("SIG!")
+			r.end = time.Now()
+			oc <- r
+			done.Done()
+			return
+		default:
+			// NOOP
+		}
+		t := time.Now()
+		_, err := db.Exec(line)
+		r.dbTime += time.Since(t)
+		// TODO should this be after the err != nil? It counts towards work attempted
+		// but not work completed.
+		r.workCount++
+		if err != nil {
+			r.errors++
+			if debugMode {
+				log.Printf("Worker #%d: %s - %s", workerNum, line, err.Error())
+			}
+		} else {
+			// Sleep for the configured amount of pause time between each call
+			time.Sleep(pause)
+		}
+	}
+
+	// Let everyone know we're done, and bail out
+	r.end = time.Now()
+	oc <- r
+	done.Done()
 }
 
 func getConfig() (*config, error) {
