@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +42,8 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// Open the connection to the DB - should each worker open it's own connection?
+	// Food for thought
 	db, err := sql.Open(cfg.db, cfg.connString)
 	if err != nil {
 		log.Fatal(err)
@@ -57,34 +60,7 @@ func main() {
 	wg.Add(cfg.workers)
 
 	// Start the pool of workers up, reading from the channel
-	for i := 0; i < cfg.workers; i++ {
-		// Pass in everything it needs
-		go func(workerNum int, ic <-chan string, oc chan<- result, d *sql.DB, done *sync.WaitGroup, pause time.Duration, debugMode bool) {
-			// Prep the result object
-			r := result{start: time.Now()}
-			for line := range ic {
-				t := time.Now()
-				_, err := db.Exec(line)
-				r.dbTime += time.Since(t)
-				// TODO should this be after the err != nil? It counts towards work attempted
-				// but not work completed.
-				r.workCount++
-				if err != nil {
-					r.errors++
-					if debugMode {
-						log.Printf("Worker #%d: %s - %s", workerNum, line, err.Error())
-					}
-				} else {
-					// Sleep for the configured amount of pause time between each call
-					time.Sleep(pause)
-				}
-			}
-			// Let everyone know we're done, and bail out
-			r.end = time.Now()
-			oc <- r
-			done.Done()
-		}(i, inputChan, outputChan, db, &wg, cfg.pauseInterval, cfg.debugMode)
-	}
+	startWorkers(cfg.workers, inputChan, outputChan, db, &wg, cfg.pauseInterval, cfg.debugMode)
 
 	// Warm up error and line so I can use error in the for loop with running into
 	// a shadowing issue
@@ -116,18 +92,76 @@ func main() {
 	// Collect all results, report them. This will block and wait until all results
 	// are in
 	fmt.Println("Slammer Status:")
-	fmt.Printf("Queries to run: %d\n", totalWorkCount)
+	totalErrors := 0
+	var totalDbTime time.Duration
 	for i := 0; i < cfg.workers; i++ {
 		r := <-outputChan
 		workerDuration := r.end.Sub(r.start)
+		totalErrors += r.errors
+		totalDbTime += r.dbTime
 		fmt.Printf("---- Worker #%d ----\n", i)
 		fmt.Printf("  Started at %s , Ended at %s, Worker time %s, DB time %s\n", r.start.Format("2006-01-02 15:04:05"), r.end.Format("2006-01-02 15:04:05"), workerDuration.String(), r.dbTime)
-		fmt.Printf("  Total work: %d, Percentage work: %f, Average work over DB time: %f\n", r.workCount, float64(r.workCount)/float64(totalWorkCount), float64(r.workCount)/float64(r.dbTime))
-		fmt.Printf("  Total errors: %d , Percentage errors: %f, Average errors per second: %f\n", r.errors, float64(r.errors)/float64(r.workCount), float64(r.errors)/workerDuration.Seconds())
+		fmt.Printf("  Units of work: %d, Percentage work: %f, Average work over DB time: %f\n", r.workCount, float64(r.workCount)/float64(totalWorkCount), float64(r.workCount)/float64(r.dbTime))
+		fmt.Printf("  Errors: %d , Percentage errors: %f, Average errors per second: %f\n", r.errors, float64(r.errors)/float64(r.workCount), float64(r.errors)/workerDuration.Seconds())
 	}
-
+	// TODO work on improving what we report here
+	fmt.Printf("---- Overall ----\n")
+	fmt.Printf("  Units of work: %d, DB time %s, Average work over DB time: %f\n", totalWorkCount, totalDbTime, float64(totalWorkCount)/float64(totalDbTime))
+	fmt.Printf("  Errors: %d, Percentage errors: %f\n", totalErrors, float64(totalErrors)/float64(totalWorkCount))
 	// Lets just be nice and tidy
 	close(outputChan)
+}
+
+func startWorkers(count int, ic <-chan string, oc chan<- result, db *sql.DB, wg *sync.WaitGroup, pause time.Duration, debugMode bool) {
+	// Start the pool of workers up, reading from the channel
+	for i := 0; i < count; i++ {
+		// register a signal chan for handling shutdown
+		sc := make(chan os.Signal)
+		signal.Notify(sc, os.Interrupt)
+		// Pass in everything it needs
+		go startWorker(i, ic, oc, sc, db, wg, pause, debugMode)
+	}
+}
+
+func startWorker(workerNum int, ic <-chan string, oc chan<- result, sc <-chan os.Signal, db *sql.DB, done *sync.WaitGroup, pause time.Duration, debugMode bool) {
+	// Prep the result object
+	r := result{start: time.Now()}
+	for line := range ic {
+		// First thing is first - do a non blocking read from the signal channel, and
+		// handle it if something came through the pipe
+		select {
+		case _ = <-sc:
+			// UGH I ACTUALLY ALMOST USED A GOTO HERE BUT I JUST CANT DO IT
+			// NO NO NO NO NO NO I WONT YOU CANT MAKE ME NO
+			// I could put it into an anonymous function defer, though...
+			r.end = time.Now()
+			oc <- r
+			done.Done()
+			return
+		default:
+			// NOOP
+		}
+		t := time.Now()
+		_, err := db.Exec(line)
+		r.dbTime += time.Since(t)
+		// TODO should this be after the err != nil? It counts towards work attempted
+		// but not work completed.
+		r.workCount++
+		if err != nil {
+			r.errors++
+			if debugMode {
+				log.Printf("Worker #%d: %s - %s", workerNum, line, err.Error())
+			}
+		} else {
+			// Sleep for the configured amount of pause time between each call
+			time.Sleep(pause)
+		}
+	}
+
+	// Let everyone know we're done, and bail out
+	r.end = time.Now()
+	oc <- r
+	done.Done()
 }
 
 func getConfig() (*config, error) {
@@ -136,6 +170,8 @@ func getConfig() (*config, error) {
 	db := flag.String("db", "mysql", "The database driver to load. Defaults to mysql")
 	w := flag.Int("w", 1, "The number of workers to use. A number greater than 1 will enable statements to be issued concurrently")
 	d := flag.Bool("d", false, "Debug mode - turn this on to have errors printed to the terminal")
+	// TODO support an "interactive" flag to drop you into a shell that outputs things like
+	// sparklines of the current worker throughputs
 	flag.Parse()
 
 	if *c == "" {
