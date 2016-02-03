@@ -60,6 +60,7 @@ func main() {
 	wg.Add(cfg.workers)
 
 	// Start the pool of workers up, reading from the channel
+	totalStart := time.Now()
 	startWorkers(cfg.workers, inputChan, outputChan, db, &wg, cfg.pauseInterval, cfg.debugMode)
 
 	// Warm up error and line so I can use error in the for loop with running into
@@ -89,6 +90,8 @@ func main() {
 	// debug or error messages from the workers. The waitgroup semaphore prevents this
 	// even though it probably looks redundant
 	wg.Wait()
+	totalEnd := time.Now()
+	wallTime := totalEnd.Sub(totalStart)
 	// Collect all results, report them. This will block and wait until all results
 	// are in
 	fmt.Println("Slammer Status:")
@@ -100,13 +103,14 @@ func main() {
 		totalErrors += r.errors
 		totalDbTime += r.dbTime
 		fmt.Printf("---- Worker #%d ----\n", i)
-		fmt.Printf("  Started at %s , Ended at %s, Worker time %s, DB time %s\n", r.start.Format("2006-01-02 15:04:05"), r.end.Format("2006-01-02 15:04:05"), workerDuration.String(), r.dbTime)
+		fmt.Printf("  Started at %s , Ended at %s, Wall time %s, DB time %s\n", r.start.Format("2006-01-02 15:04:05"), r.end.Format("2006-01-02 15:04:05"), workerDuration.String(), r.dbTime)
 		fmt.Printf("  Units of work: %d, Percentage work: %f, Average work over DB time: %f\n", r.workCount, float64(r.workCount)/float64(totalWorkCount), float64(r.workCount)/float64(r.dbTime))
 		fmt.Printf("  Errors: %d , Percentage errors: %f, Average errors per second: %f\n", r.errors, float64(r.errors)/float64(r.workCount), float64(r.errors)/workerDuration.Seconds())
 	}
 	// TODO work on improving what we report here
 	fmt.Printf("---- Overall ----\n")
-	fmt.Printf("  Units of work: %d, DB time %s, Average work over DB time: %f\n", totalWorkCount, totalDbTime, float64(totalWorkCount)/float64(totalDbTime))
+	fmt.Printf("  Started at %s , Ended at %s, Wall time %s, DB time %s\n", totalStart.Format("2006-01-02 15:04:05"), totalEnd.Format("2006-01-02 15:04:05"), wallTime, totalDbTime)
+	fmt.Printf("  Units of work: %d, Average work over DB time: %f\n", totalWorkCount, float64(totalWorkCount)/float64(totalDbTime))
 	fmt.Printf("  Errors: %d, Percentage errors: %f\n", totalErrors, float64(totalErrors)/float64(totalWorkCount))
 	// Lets just be nice and tidy
 	close(outputChan)
