@@ -28,7 +28,7 @@ demonstrate using them together
 To use the command, first install
 
 ```bash
-go install github.com/StabbyCutyou/slammer
+go get github.com/StabbyCutyou/slammer
 ```
 
 The command accepts several arguments:
